@@ -3,7 +3,9 @@
 
 Commands:
   state              JSON snapshot of monitors + saved profiles
-  apply <json>       write ~/.config/hypr/monitors.lua and reload
+  apply [--preview] <json>  write monitors.lua and reload
+  confirm            keep a previewed layout (cancel the 10s revert)
+  revert             restore the layout from before the last preview
   enable <name>      turn a disabled connected output back on
   unmirror           clear mirrors and restore the last saved desk
   identify [name]    flash a Hyprland notify (panel Find uses its own overlay)
@@ -19,9 +21,10 @@ Commands:
   backup-original    snapshot stock files once, before Screens writes them
   restore-original   put those first snapshots back and reload Hyprland
   claim              backup leftover config, take over monitors.lua, restore scale keys
-  conflicts          show hyprmoncfg / other display managers still in control
+  conflicts          show hyprmoncfg / HyprMod / other display managers still in control
   bar-care <key> <value>  persist bar dim / hover lift
-  scale up|down|N    step focused-display scale (SUPER+/ and SUPER+ALT+/)
+  scale up|down|N    step focused-display scale
+  scale-keys take|skip|alt|set <up> <down>  keep, skip, or change scale keybinds
 """
 
 from __future__ import annotations
@@ -38,6 +41,8 @@ import time
 MONITORS_LUA = os.path.expanduser("~/.config/hypr/monitors.lua")
 BINDINGS_LUA = os.path.expanduser("~/.config/hypr/bindings.lua")
 BACKUP_DIR = os.path.expanduser("~/.local/state/im0001gt.screens")
+REVERT_LUA = os.path.join(BACKUP_DIR, "revert-monitors.lua")
+CM_PRESETS = ("auto", "srgb", "dcip3", "dp3", "adobe", "wide", "edid", "hdr", "hdredid")
 PROFILES_PATH = os.path.join(BACKUP_DIR, "profiles.json")
 ORIGINAL_BACKUP = os.path.join(BACKUP_DIR, "original-monitors.lua")
 WORKSPACES_JSON = os.path.join(BACKUP_DIR, "workspaces.json")
@@ -58,6 +63,10 @@ HYPRMONCFG_PLUGIN_DIR = os.path.expanduser(
 )
 HYPRMONCFG_DAEMON = "hyprmoncfgd"
 HYPRMONCFG_UNIT = HYPRMONCFG_DAEMON + ".service"
+HYPRLAND_LUA = os.path.expanduser("~/.config/hypr/hyprland.lua")
+HYPRLAND_CONF = os.path.expanduser("~/.config/hypr/hyprland.conf")
+HYPRMOD_GUI_LUA = os.path.expanduser("~/.config/hypr/hyprland-gui.lua")
+HYPRMOD_GUI_CONF = os.path.expanduser("~/.config/hypr/hyprland-gui.conf")
 OLED_GUARD_PLUGIN_DIR = os.path.expanduser("~/.config/omarchy/plugins/oled.guard")
 SCALE_PRESETS = (1, 1.25, 1.6, 2, 3, 4)
 
@@ -225,7 +234,14 @@ def edid_caps(name):
                     hdmi_vsdb = True
                     if len(payload) >= 7 and payload[6] & 0x70:
                         hdmi_deep = True
-                        caps["bitdepth"] = 10
+                        # DC_48 = 16-bit, DC_36 = 12-bit (Dolby Vision), DC_30 = 10-bit.
+                        # Hyprland only honors 8 vs 10 on the wire; 12/16 stay in Screens.
+                        if payload[6] & 0x40:
+                            caps["bitdepth"] = 16
+                        elif payload[6] & 0x20:
+                            caps["bitdepth"] = 12
+                        else:
+                            caps["bitdepth"] = 10
 
     walk(data[128:256] if len(data) >= 256 else b"")
     if len(data) >= 384:
@@ -295,6 +311,18 @@ def parse_lua_monitors(text):
         m = re.search(r"sdrbrightness\s*=\s*([0-9.]+)", block)
         if m:
             entry["sdrBrightness"] = float(m.group(1))
+        m = re.search(r"sdrsaturation\s*=\s*([0-9.]+)", block)
+        if m:
+            entry["sdrSaturation"] = float(m.group(1))
+        m = re.search(r'sdr_eotf\s*=\s*"([^"]+)"', block)
+        if m:
+            entry["sdrEotf"] = m.group(1)
+        m = re.search(r"max_avg_luminance\s*=\s*([0-9.]+)", block)
+        if m:
+            entry["maxAvgLuminance"] = int(float(m.group(1)))
+        m = re.search(r"supports_wide_color\s*=\s*(-?\d+)", block)
+        if m:
+            entry["supportsWideColor"] = int(m.group(1))
         m = re.search(r"(?<![a-z_])min_luminance\s*=\s*([0-9.]+)", block)
         if m:
             entry["minLuminance"] = float(m.group(1))
@@ -499,6 +527,8 @@ def stub_monitor(name):
         "sdrMinLuminance": 0.2,
         "sdrMaxLuminance": 80,
         "sdrBrightness": 1.0,
+        "sdrSaturation": 1.0,
+        "sdrEotf": "default",
         "wideGamut": False,
         "minLuminance": -1,
         "maxLuminance": -1,
@@ -534,22 +564,25 @@ def snapshot():
         height = int(mon.get("height") or 0)
         lw, lh = logical_size(width, height, scale, transform)
         caps = edid_caps(name)
+        edid_hdr = bool(caps.get("hdr"))
         hdr_on = is_hdr(mon)
-        if hdr_on:
-            caps["hdr"] = True
         if vrr_mode(mon):
             caps["vrr"] = True
         if not caps["vrr"] and any(p["refresh"] >= 100 for p in modes):
             caps["vrr"] = True
         fmt = str(mon.get("currentFormat") or "").upper()
-        if any(tok in fmt for tok in ("2101010", "101010", "P010", "P012")):
-            caps["bitdepth"] = 10
+        if "16161616" in fmt:
+            caps["bitdepth"] = max(int(caps.get("bitdepth") or 8), 16)
+        elif "P012" in fmt or "121212" in fmt:
+            caps["bitdepth"] = max(int(caps.get("bitdepth") or 8), 12)
+        elif any(tok in fmt for tok in ("2101010", "101010", "P010")):
+            caps["bitdepth"] = max(int(caps.get("bitdepth") or 8), 10)
         mirror = mon.get("mirrorOf") or ""
         if mirror == "none":
             mirror = ""
         vrr = vrr_mode(mon)
         cm = mon.get("colorManagementPreset") or "srgb"
-        bitdepth = 10 if hdr_on and caps["bitdepth"] >= 10 else (10 if caps["bitdepth"] >= 10 else 8)
+        bitdepth = clean_bitdepth(caps.get("bitdepth"), 8)
         if hdr_on and any(tok in fmt for tok in ("XRGB8888", "XR24", "AR24")):
             bitdepth = 8
         sdr_min = mon.get("sdrMinLuminance")
@@ -567,6 +600,11 @@ def snapshot():
             sdr_bright = float(sdr_bright) if sdr_bright is not None else 1.0
         except (TypeError, ValueError):
             sdr_bright = 1.0
+        sdr_sat = mon.get("sdrSaturation")
+        try:
+            sdr_sat = float(sdr_sat) if sdr_sat is not None else 1.0
+        except (TypeError, ValueError):
+            sdr_sat = 1.0
         entry = {
             "name": name,
             "description": mon.get("description") or "",
@@ -587,13 +625,16 @@ def snapshot():
             "format": mon.get("currentFormat") or "",
             "hdr": hdr_on,
             "hdrMode": 2 if hdr_on else 0,
-            "hdrCapable": caps["hdr"],
+            "hdrCapable": edid_hdr,
             "vrrCapable": caps["vrr"],
             "bitdepth": bitdepth,
-            "bitdepthCapable": 10 if caps["bitdepth"] >= 10 else 8,
+            "bitdepthCapable": clean_bitdepth(caps.get("bitdepth"), 8),
             "sdrMinLuminance": sdr_min,
             "sdrMaxLuminance": sdr_max,
             "sdrBrightness": sdr_bright,
+            "sdrSaturation": sdr_sat,
+            "sdrEotf": "default",
+            "supportsWideColor": 0,
             "wideGamut": bool(caps.get("wide_gamut")),
             "minLuminance": caps["min_luminance"] if caps["min_luminance"] is not None else -1,
             "maxLuminance": caps["max_luminance"] if caps["max_luminance"] is not None else -1,
@@ -613,16 +654,28 @@ def snapshot():
     layout_by_id = layout_map(store_early.get("lastLayout"))
     for entry in monitors:
         saved = layout_by_id.get(entry.get("identity") or "") or {}
-        for key in ("bitdepth", "cm", "hdrMode", "sdrMinLuminance", "sdrMaxLuminance", "sdrBrightness", "minLuminance", "maxLuminance"):
+        for key in (
+            "bitdepth", "cm", "hdrMode", "sdrMinLuminance", "sdrMaxLuminance",
+            "sdrBrightness", "sdrSaturation", "sdrEotf", "supportsWideColor",
+            "textPx", "minLuminance",
+            "maxLuminance", "maxAvgLuminance",
+        ):
             if key in saved and saved[key] not in (None, ""):
                 entry[key] = saved[key]
         rule = lua_rule_for(entry, lua_rules)
         if "vrr" in rule:
             entry["vrr"] = rule["vrr"]
-        for key in ("bitdepth", "cm", "hdrMode", "sdrMinLuminance", "sdrMaxLuminance", "sdrBrightness", "minLuminance", "maxLuminance"):
+        for key in (
+            "bitdepth", "cm", "hdrMode", "sdrMinLuminance", "sdrMaxLuminance",
+            "sdrBrightness", "sdrSaturation", "sdrEotf", "supportsWideColor",
+            "textPx", "minLuminance",
+            "maxLuminance", "maxAvgLuminance",
+        ):
             if key in rule:
                 entry[key] = rule[key]
         mode = hdr_mode(entry)
+        if not entry.get("hdrCapable"):
+            mode = 0
         entry["hdrMode"] = mode
         entry["hdr"] = mode == 2
     merge_drm_connected(monitors)
@@ -671,6 +724,8 @@ def snapshot():
         "claimedMonitors": bool(store.get("claimedMonitors")),
         "barCare": normalize_bar_care(store.get("barCare")),
         "oledGuard": os.path.isdir(OLED_GUARD_PLUGIN_DIR),
+        "pendingRevert": store.get("pendingRevert") or None,
+        "scaleKeys": public_scale_keys(store.get("scaleKeys")),
     }
 
 
@@ -744,10 +799,13 @@ def load_store():
                 store["workspaceLayouts"] = cleaned
             store["workspacesBarId"] = str(data.get("workspacesBarId") or "")
             store["barCare"] = normalize_bar_care(data.get("barCare"))
+            store["scaleKeys"] = data.get("scaleKeys") if isinstance(data.get("scaleKeys"), dict) else {}
     except (OSError, json.JSONDecodeError):
         pass
     if "barCare" not in store:
         store["barCare"] = normalize_bar_care(None)
+    if "scaleKeys" not in store:
+        store["scaleKeys"] = {}
     return store
 
 
@@ -825,7 +883,9 @@ def restore_desk_geometry(monitors):
         for key in (
             "mode", "x", "y", "scale", "transform", "vrr", "hdr",
             "hdrMode", "bitdepth", "cm", "sdrMinLuminance", "sdrMaxLuminance",
-            "sdrBrightness", "minLuminance", "maxLuminance",
+            "sdrBrightness", "sdrSaturation", "sdrEotf", "supportsWideColor",
+            "textPx", "minLuminance",
+            "maxLuminance", "maxAvgLuminance",
         ):
             if key in rule:
                 mon[key] = rule[key]
@@ -1050,9 +1110,30 @@ def clean_bitdepth(value, default=10):
     return 10 if n >= 10 else 8
 
 
+def hypr_wire_bitdepth(value):
+    return 10 if clean_bitdepth(value, 10) >= 10 else 8
+
+
+def clean_wide_color(value):
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return 0
+    if n > 0:
+        return 1
+    if n < 0:
+        return -1
+    return 0
+
+
 def clean_cm(value):
     text = str(value or "").strip().lower()
-    return text if text in ("hdr", "hdredid") else "hdr"
+    return text if text in CM_PRESETS else "srgb"
+
+
+def clean_sdr_eotf(value):
+    text = str(value or "").strip().lower()
+    return text if text in ("default", "srgb", "gamma22") else "default"
 
 
 def clean_workspace_layout(value):
@@ -1124,8 +1205,13 @@ def sanitize_monitor(mon, known_names=None):
         "sdrMinLuminance": clean_float(mon.get("sdrMinLuminance"), 0.0, 1.0, 0.005),
         "sdrMaxLuminance": clean_int(mon.get("sdrMaxLuminance"), 40, 1000, 200),
         "sdrBrightness": clean_float(mon.get("sdrBrightness"), 0.5, 2.5, 1.0),
+        "sdrSaturation": clean_float(mon.get("sdrSaturation"), 0.5, 2.0, 1.0),
+        "sdrEotf": clean_sdr_eotf(mon.get("sdrEotf")),
+        "supportsWideColor": clean_wide_color(mon.get("supportsWideColor")),
         "minLuminance": clean_float(mon.get("minLuminance"), 0.0, 10.0, -1),
         "maxLuminance": clean_int(mon.get("maxLuminance"), -1, 10000, -1),
+        "maxAvgLuminance": clean_int(mon.get("maxAvgLuminance"), -1, 10000, -1),
+        "textPx": clean_int(mon.get("textPx"), 0, 20, 0),
         "enabled": bool(mon.get("enabled", True)),
         "identity": mon.get("identity") or "",
         "mirror": mirror,
@@ -1165,11 +1251,16 @@ def monitor_lua(mon, used_desc):
     # Persist the integer even when 0. hyprctl often reports VRR as a boolean.
     fields.append("vrr = %d" % int(mon.get("vrr") or 0))
     mode = hdr_mode(mon)
+    cm = clean_cm(mon.get("cm"))
     if mode in (1, 2):
-        fields.append("bitdepth = %d" % clean_bitdepth(mon.get("bitdepth"), 10))
+        fields.append("bitdepth = %d" % hypr_wire_bitdepth(mon.get("bitdepth")))
         fields.append("supports_hdr = 1")
         if mode == 2:
-            fields.append("cm = %s" % lua_str(clean_cm(mon.get("cm"))))
+            if cm not in ("hdr", "hdredid"):
+                cm = "hdredid"
+            fields.append("cm = %s" % lua_str(cm))
+        elif cm and cm not in ("srgb", "auto"):
+            fields.append("cm = %s" % lua_str(cm))
         sdr_min = mon.get("sdrMinLuminance")
         if sdr_min is None:
             sdr_min = 0.005
@@ -1179,6 +1270,14 @@ def monitor_lua(mon, used_desc):
         if sdr_bright is None:
             sdr_bright = 1.0
         fields.append("sdrbrightness = %s" % format_float(sdr_bright))
+        sdr_sat = mon.get("sdrSaturation")
+        if sdr_sat is None:
+            sdr_sat = 1.0
+        if abs(float(sdr_sat) - 1.0) > 0.001:
+            fields.append("sdrsaturation = %s" % format_float(sdr_sat))
+        eotf = clean_sdr_eotf(mon.get("sdrEotf"))
+        if eotf != "default":
+            fields.append("sdr_eotf = %s" % lua_str(eotf))
         min_lum = mon.get("minLuminance")
         try:
             min_lum = float(min_lum)
@@ -1189,6 +1288,17 @@ def monitor_lua(mon, used_desc):
         max_lum = clean_int(mon.get("maxLuminance"), -1, 10000, -1)
         if max_lum > 0:
             fields.append("max_luminance = %d" % max_lum)
+        max_avg = clean_int(mon.get("maxAvgLuminance"), -1, 10000, -1)
+        if max_avg > 0:
+            fields.append("max_avg_luminance = %d" % max_avg)
+        wide = clean_wide_color(mon.get("supportsWideColor"))
+        if wide:
+            fields.append("supports_wide_color = %d" % wide)
+    elif cm and cm not in ("srgb",):
+        fields.append("cm = %s" % lua_str(cm))
+        wide = clean_wide_color(mon.get("supportsWideColor"))
+        if wide:
+            fields.append("supports_wide_color = %d" % wide)
     mirror = mon.get("mirror") or ""
     if mirror and mirror not in ("none", name, mon.get("name")):
         fields.append("mirror = %s" % lua_str(mirror))
@@ -1846,11 +1956,140 @@ def conflict_message(info):
     )
 
 
-def detect_conflicts():
-    now = time.time()
-    cached = _conflict_cache.get("info")
-    if cached is not None and now - float(_conflict_cache.get("at") or 0) < 15:
-        return cached
+def clear_conflict_cache():
+    _conflict_cache["at"] = 0.0
+    _conflict_cache["info"] = None
+
+
+def _lua_code_text(text):
+    """Drop Lua comments so leftover -- hl.monitor lines are not treated as live."""
+    if not text:
+        return ""
+    text = re.sub(r"--\[\[.*?\]\]", "", text, flags=re.S)
+    lines = []
+    for line in text.splitlines():
+        out = []
+        i = 0
+        in_str = False
+        quote = ""
+        while i < len(line):
+            ch = line[i]
+            if in_str:
+                out.append(ch)
+                if ch == "\\" and i + 1 < len(line):
+                    out.append(line[i + 1])
+                    i += 2
+                    continue
+                if ch == quote:
+                    in_str = False
+                i += 1
+                continue
+            if ch in "\"'":
+                in_str = True
+                quote = ch
+                out.append(ch)
+                i += 1
+                continue
+            if ch == "-" and i + 1 < len(line) and line[i + 1] == "-":
+                break
+            out.append(ch)
+            i += 1
+        lines.append("".join(out))
+    return "\n".join(lines)
+
+
+def _conf_code_text(text):
+    if not text:
+        return ""
+    lines = []
+    for line in text.splitlines():
+        lines.append(line.split("#", 1)[0])
+    return "\n".join(lines)
+
+
+def parse_hyprmod_lua_outputs(text):
+    names = []
+    clean = _lua_code_text(text)
+    for match in re.finditer(r"hl\.monitor\s*\(", clean):
+        brace = clean.find("{", match.end())
+        if brace < 0:
+            continue
+        depth = 0
+        end = -1
+        for i, ch in enumerate(clean[brace:], brace):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        if end < 0:
+            continue
+        block = clean[brace:end + 1]
+        found = re.search(r"output\s*=\s*[\"']([^\"']+)[\"']", block)
+        if found:
+            name = found.group(1).strip()
+            if name:
+                names.append(name)
+    return names
+
+
+def parse_hyprmod_conf_outputs(text):
+    names = []
+    for line in _conf_code_text(text).splitlines():
+        found = re.match(r"\s*monitor\s*=\s*([^,]+)", line, re.I)
+        if not found:
+            continue
+        name = found.group(1).strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def hypr_lua_mode():
+    return os.path.isfile(HYPRLAND_LUA)
+
+
+def read_hypr_text(path):
+    if not path or not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
+def hyprmod_include_active():
+    if hypr_lua_mode():
+        text = read_hypr_text(HYPRLAND_LUA)
+        return bool(re.search(r'require\(\s*["\']hyprland-gui["\']\s*\)', text))
+    text = read_hypr_text(HYPRLAND_CONF)
+    return bool(re.search(r"^\s*source\s*=\s*.*hyprland-gui\.conf", text, re.I | re.M))
+
+
+def hyprmod_managed_outputs():
+    if hypr_lua_mode():
+        return parse_hyprmod_lua_outputs(read_hypr_text(HYPRMOD_GUI_LUA))
+    return parse_hyprmod_conf_outputs(read_hypr_text(HYPRMOD_GUI_CONF))
+
+
+def hyprmod_conflict_message(outputs):
+    names = [n for n in outputs if n]
+    n = len(names)
+    noun = "display" if n == 1 else "displays"
+    shown = ", ".join(names[:6])
+    extra = " (%s)" % shown if shown else ""
+    return (
+        "HyprMod is managing %d %s%s. Screens will not work correctly until you "
+        "open HyprMod, click the trash can next to each of those displays, and save. "
+        "Screens will not remove HyprMod's monitor rules for you."
+        % (n, noun, extra)
+    )
+
+
+def detect_hyprmoncfg():
     plugin = os.path.isdir(HYPRMONCFG_PLUGIN_DIR)
     enabled = plugin_enabled(HYPRMONCFG_PLUGIN_ID) if plugin else False
     daemon_running = process_named(HYPRMONCFG_DAEMON)
@@ -1858,7 +2097,8 @@ def detect_conflicts():
     package = bool(shutil.which(HYPRMONCFG_DAEMON) or shutil.which("hyprmoncfg"))
     blocking = bool(enabled or daemon_running or daemon_wanted)
     present = bool(plugin or blocking or package)
-    info = {
+    shown = blocking or plugin
+    return {
         "id": HYPRMONCFG_PLUGIN_ID,
         "name": "hyprmoncfg",
         "plugin": plugin,
@@ -1874,8 +2114,62 @@ def detect_conflicts():
             "daemon": daemon_running or daemon_wanted,
             "package": package,
             "blocking": blocking,
-        }) if (blocking or plugin) else "",
+        }) if shown else "",
     }
+
+
+def detect_hyprmod():
+    installed = bool(shutil.which("hyprmod"))
+    included = hyprmod_include_active()
+    outputs = hyprmod_managed_outputs() if included else []
+    managing = bool(included and outputs)
+    return {
+        "id": "hyprmod",
+        "name": "HyprMod",
+        "plugin": False,
+        "enabled": managing,
+        "daemon": False,
+        "daemonActive": False,
+        "package": installed,
+        "installed": installed,
+        "included": included,
+        "outputs": outputs,
+        "blocking": managing,
+        "present": managing,
+        "message": hyprmod_conflict_message(outputs) if managing else "",
+    }
+
+
+def merge_conflicts(hyprmoncfg, hyprmod):
+    show_hm = bool(hyprmoncfg.get("blocking") or hyprmoncfg.get("plugin"))
+    show_hy = bool(hyprmod.get("blocking"))
+    if show_hm and show_hy:
+        msg = " ".join(
+            part for part in (hyprmoncfg.get("message"), hyprmod.get("message")) if part
+        )
+        return {
+            "id": "display-managers",
+            "name": "hyprmoncfg and HyprMod",
+            "plugin": True,
+            "enabled": True,
+            "daemon": bool(hyprmoncfg.get("daemon")),
+            "package": True,
+            "blocking": True,
+            "present": True,
+            "message": msg,
+            "outputs": list(hyprmod.get("outputs") or []),
+        }
+    if show_hy:
+        return hyprmod
+    return hyprmoncfg
+
+
+def detect_conflicts():
+    now = time.time()
+    cached = _conflict_cache.get("info")
+    if cached is not None and now - float(_conflict_cache.get("at") or 0) < 15:
+        return cached
+    info = merge_conflicts(detect_hyprmoncfg(), detect_hyprmod())
     _conflict_cache["at"] = now
     _conflict_cache["info"] = info
     return info
@@ -1892,28 +2186,224 @@ def public_conflict(info):
         "daemon": bool(info.get("daemon")),
         "package": bool(info.get("package")),
         "blocking": bool(info.get("blocking")),
+        "present": True,
         "message": info.get("message") or "",
+        "outputs": list(info.get("outputs") or []),
     }
 
 
-def scale_bindings_block():
+SCALE_KEY_UP_DEFAULT = "SUPER + SLASH"
+SCALE_KEY_DOWN_DEFAULT = "SUPER + ALT + SLASH"
+SCALE_KEY_ALTERNATES = (
+    ("SUPER + CTRL + SLASH", "SUPER + CTRL + ALT + SLASH"),
+    ("SUPER + CTRL + MINUS", "SUPER + CTRL + EQUAL"),
+)
+STOCK_SCALE_LABELS = ("Monitor scaling up", "Monitor scaling down")
+STOCK_TILING_LUA = "/usr/share/omarchy/default/hypr/bindings/tiling.lua"
+COMBO_TOKEN_RE = re.compile(
+    r"^(SUPER|SHIFT|CTRL|CONTROL|ALT|MINUS|EQUAL|SLASH|PERIOD|COMMA|SPACE|"
+    r"RETURN|TAB|ESC|ESCAPE|F([1-9]|1[0-2])|[A-Z]|[0-9])$"
+)
+
+
+def normalize_combo(value):
+    parts = [p.strip().upper() for p in re.split(r"\s*\+\s*", str(value or "")) if p.strip()]
+    out = []
+    for part in parts:
+        if part == "CONTROL":
+            part = "CTRL"
+        if part == "ESCAPE":
+            part = "ESC"
+        if not COMBO_TOKEN_RE.match(part):
+            return ""
+        out.append(part)
+    if len(out) < 2 or "SUPER" not in out:
+        return ""
+    order = ["SUPER", "CTRL", "ALT", "SHIFT"]
+    mods = [m for m in order if m in out]
+    keys = [p for p in out if p not in order]
+    if len(keys) != 1:
+        return ""
+    return " + ".join(mods + keys)
+
+
+def strip_managed_bindings(text):
+    if MANAGED_BEGIN not in (text or "") or MANAGED_END not in (text or ""):
+        return text or ""
+    pre = text.split(MANAGED_BEGIN, 1)[0]
+    post = text.split(MANAGED_END, 1)[1]
+    return pre + post
+
+
+def parse_lua_key_actions(text):
+    """Last unbind/bind for each combo in a lua bindings file."""
+    actions = {}
+    pattern = re.compile(
+        r'hl\.unbind\(\s*"([^"]+)"\s*\)|'
+        r'o\.bind\(\s*"([^"]+)"\s*,\s*"([^"]*)"(?:\s*,\s*(?:"([^"]*)"|(\{[^}]*\})))?',
+        re.S,
+    )
+    for match in pattern.finditer(text or ""):
+        if match.group(1):
+            combo = normalize_combo(match.group(1))
+            if combo:
+                actions[combo] = {"kind": "unbind", "label": "", "command": ""}
+            continue
+        combo = normalize_combo(match.group(2))
+        if not combo:
+            continue
+        actions[combo] = {
+            "kind": "bind",
+            "label": match.group(3) or "",
+            "command": (match.group(4) or match.group(5) or ""),
+        }
+    return actions
+
+
+def is_stock_or_screens_scale(label, command):
+    cmd = str(command or "")
+    lab = str(label or "")
+    if "omarchy-hyprland-monitor-scaling" in cmd:
+        return True
+    if "im0001gt.screens" in cmd or "display-ctl scale" in cmd:
+        return True
+    if lab in STOCK_SCALE_LABELS:
+        return True
+    return False
+
+
+def combo_from_hypr_bind(bind):
+    if not isinstance(bind, dict):
+        return ""
+    mask = int(bind.get("modmask") or 0)
+    key = str(bind.get("key") or "").upper()
+    if not key or key in ("", "catchall"):
+        return ""
+    mods = []
+    if mask & 64:
+        mods.append("SUPER")
+    if mask & 4:
+        mods.append("CTRL")
+    if mask & 8:
+        mods.append("ALT")
+    if mask & 1:
+        mods.append("SHIFT")
+    if not mods:
+        return ""
+    return normalize_combo(" + ".join(mods + [key]))
+
+
+def live_scale_binds():
+    raw = hypr_json(["binds"]) or []
+    if not isinstance(raw, list):
+        return []
+    return raw
+
+
+def combo_conflict(combo, user_text="", live=None):
+    combo = normalize_combo(combo)
+    if not combo:
+        return None
+    lua = parse_lua_key_actions(strip_managed_bindings(user_text)).get(combo)
+    if lua and lua.get("kind") == "bind" and not is_stock_or_screens_scale(lua.get("label"), lua.get("command")):
+        return {
+            "combo": combo,
+            "label": lua.get("label") or "",
+            "command": lua.get("command") or "",
+        }
+    for bind in live if live is not None else live_scale_binds():
+        if combo_from_hypr_bind(bind) != combo:
+            continue
+        desc = bind.get("description") or ""
+        if is_stock_or_screens_scale(desc, ""):
+            continue
+        return {"combo": combo, "label": desc, "command": ""}
+    return None
+
+
+def scale_key_conflicts(up, down, user_text=None, live=None):
+    if user_text is None:
+        user_text = read_text(BINDINGS_LUA)
+    found = []
+    seen = set()
+    for combo in (up, down):
+        hit = combo_conflict(combo, user_text, live)
+        if hit and hit["combo"] not in seen:
+            seen.add(hit["combo"])
+            found.append(hit)
+    return found
+
+
+def first_free_scale_alt(user_text=None, live=None):
+    if user_text is None:
+        user_text = read_text(BINDINGS_LUA)
+    for pair in SCALE_KEY_ALTERNATES:
+        if not scale_key_conflicts(pair[0], pair[1], user_text, live):
+            return pair
+    return SCALE_KEY_ALTERNATES[0]
+
+
+def scale_keys_message(conflicts):
+    if not conflicts:
+        return ""
+    bits = []
+    for item in conflicts:
+        label = item.get("label") or "a custom action"
+        bits.append("%s is already bound to %s" % (item.get("combo") or "that key", label))
+    return (
+        "%s. Stock Display scale keys are fine to take over; this one is yours. "
+        "Take Super+/ for Screens scale, pick a free pair, or keep your bind "
+        "and change scale from the panel."
+        % "; ".join(bits)
+    )
+
+
+def public_scale_keys(raw):
+    src = raw if isinstance(raw, dict) else {}
+    status = str(src.get("status") or "")
+    if status not in ("pending", "installed", "skipped"):
+        status = "installed" if looks_managed(read_text(BINDINGS_LUA)) else ""
+    return {
+        "status": status,
+        "up": src.get("up") or SCALE_KEY_UP_DEFAULT,
+        "down": src.get("down") or SCALE_KEY_DOWN_DEFAULT,
+        "altUp": src.get("altUp") or SCALE_KEY_ALTERNATES[0][0],
+        "altDown": src.get("altDown") or SCALE_KEY_ALTERNATES[0][1],
+        "conflicts": src.get("conflicts") if isinstance(src.get("conflicts"), list) else [],
+        "message": src.get("message") or "",
+    }
+
+
+def scale_bindings_block(up=None, down=None):
+    up = normalize_combo(up) or SCALE_KEY_UP_DEFAULT
+    down = normalize_combo(down) or SCALE_KEY_DOWN_DEFAULT
     path = CTL_PATH.replace("\\", "\\\\").replace('"', '\\"')
     return "\n".join([
         MANAGED_BEGIN,
-        'hl.unbind("SUPER + SLASH")',
-        'hl.unbind("SUPER + ALT + SLASH")',
-        'o.bind("SUPER + SLASH", "Monitor scaling up", "%s scale up")' % path,
-        'o.bind("SUPER + ALT + SLASH", "Monitor scaling down", "%s scale down")' % path,
+        'hl.unbind("%s")' % up,
+        'hl.unbind("%s")' % down,
+        'o.bind("%s", "Monitor scaling up", "%s scale up")' % (up, path),
+        'o.bind("%s", "Monitor scaling down", "%s scale down")' % (down, path),
         MANAGED_END,
         "",
     ])
 
 
-def install_scale_bindings():
+def write_bindings_file(text):
+    os.makedirs(os.path.dirname(BINDINGS_LUA), exist_ok=True)
+    tmp = BINDINGS_LUA + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text if text.endswith("\n") else text + "\n")
+    os.replace(tmp, BINDINGS_LUA)
+
+
+def install_scale_bindings(up=None, down=None):
     ensure_stock_backups()
+    up = normalize_combo(up) or SCALE_KEY_UP_DEFAULT
+    down = normalize_combo(down) or SCALE_KEY_DOWN_DEFAULT
     existing = read_text(BINDINGS_LUA)
-    block = scale_bindings_block()
-    if looks_managed(existing) and CTL_PATH in existing and "scale up" in existing:
+    block = scale_bindings_block(up, down)
+    if looks_managed(existing) and CTL_PATH in existing and up in existing and down in existing:
         return False
     if looks_managed(existing):
         text = splice_managed(existing, block) or (existing.rstrip() + "\n\n" + block)
@@ -1924,12 +2414,103 @@ def install_scale_bindings():
             "-- Screens restores Omarchy's monitor scale keys after it takes over monitors.lua.\n\n"
             + block
         )
-    os.makedirs(os.path.dirname(BINDINGS_LUA), exist_ok=True)
-    tmp = BINDINGS_LUA + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(text if text.endswith("\n") else text + "\n")
-    os.replace(tmp, BINDINGS_LUA)
+    write_bindings_file(text)
     return True
+
+
+def remove_scale_bindings():
+    existing = read_text(BINDINGS_LUA)
+    if not looks_managed(existing):
+        return False
+    pre = existing.split(MANAGED_BEGIN, 1)[0].rstrip()
+    post = existing.split(MANAGED_END, 1)[1].lstrip("\n")
+    text = (pre + "\n" + post).strip() + "\n"
+    write_bindings_file(text)
+    return True
+
+
+def save_scale_keys(status, up, down, conflicts=None, message="", alt=None):
+    store = load_store()
+    alt = alt or first_free_scale_alt()
+    store["scaleKeys"] = {
+        "status": status,
+        "up": up,
+        "down": down,
+        "altUp": alt[0],
+        "altDown": alt[1],
+        "conflicts": conflicts or [],
+        "message": message or "",
+    }
+    save_store(store)
+    return store["scaleKeys"]
+
+
+def maybe_install_scale_bindings():
+    store = load_store()
+    sk = store.get("scaleKeys") or {}
+    status = str(sk.get("status") or "")
+    existing = read_text(BINDINGS_LUA)
+    if status == "skipped":
+        return False
+    if status == "pending":
+        return False
+    if status == "installed" and looks_managed(existing) and CTL_PATH in existing:
+        return False
+    up, down = SCALE_KEY_UP_DEFAULT, SCALE_KEY_DOWN_DEFAULT
+    conflicts = scale_key_conflicts(up, down)
+    if conflicts:
+        alt = first_free_scale_alt()
+        save_scale_keys("pending", up, down, conflicts, scale_keys_message(conflicts), alt)
+        return False
+    changed = install_scale_bindings(up, down)
+    save_scale_keys("installed", up, down)
+    return changed
+
+
+def apply_scale_keys(action, up="", down=""):
+    action = str(action or "").strip().lower()
+    if action in ("take", "default"):
+        changed = install_scale_bindings(SCALE_KEY_UP_DEFAULT, SCALE_KEY_DOWN_DEFAULT)
+        save_scale_keys("installed", SCALE_KEY_UP_DEFAULT, SCALE_KEY_DOWN_DEFAULT)
+        if changed:
+            reload_hypr()
+        print(json.dumps(snapshot(), separators=(",", ":")))
+        return 0
+    if action in ("skip", "keep"):
+        if remove_scale_bindings():
+            reload_hypr()
+        save_scale_keys("skipped", SCALE_KEY_UP_DEFAULT, SCALE_KEY_DOWN_DEFAULT)
+        print(json.dumps(snapshot(), separators=(",", ":")))
+        return 0
+    if action == "alt":
+        pair = first_free_scale_alt()
+        changed = install_scale_bindings(pair[0], pair[1])
+        save_scale_keys("installed", pair[0], pair[1])
+        if changed:
+            reload_hypr()
+        print(json.dumps(snapshot(), separators=(",", ":")))
+        return 0
+    if action == "set":
+        up = normalize_combo(up)
+        down = normalize_combo(down)
+        if not up or not down or up == down:
+            print("scale-keys: need two Super+ combos", file=sys.stderr)
+            return 2
+        extra = scale_key_conflicts(up, down)
+        if extra:
+            print(
+                "scale-keys: %s" % scale_keys_message(extra),
+                file=sys.stderr,
+            )
+            return 2
+        changed = install_scale_bindings(up, down)
+        save_scale_keys("installed", up, down)
+        if changed:
+            reload_hypr()
+        print(json.dumps(snapshot(), separators=(",", ":")))
+        return 0
+    print("scale-keys: take|skip|alt|set", file=sys.stderr)
+    return 2
 
 
 def gcd_int(a, b):
@@ -2027,7 +2608,7 @@ def scale_step(requested):
 def claim_monitors(force=False):
     existing = read_text(MONITORS_LUA) if os.path.isfile(MONITORS_LUA) else ""
     ensure_original_backup(existing)
-    bindings_changed = install_scale_bindings()
+    bindings_changed = maybe_install_scale_bindings()
     store = load_store()
     conflicts = detect_conflicts()
     leftover = leftover_outside_managed(existing)
@@ -2069,7 +2650,59 @@ def reload_hypr():
     time.sleep(0.15)
 
 
-def apply(payload, gdk=None):
+def stash_revert_lua(prev_text):
+    if os.path.isfile(REVERT_LUA) or not prev_text:
+        return
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    with open(REVERT_LUA, "w", encoding="utf-8") as fh:
+        fh.write(prev_text)
+
+
+def clear_pending_revert():
+    try:
+        os.remove(REVERT_LUA)
+    except OSError:
+        pass
+    store = load_store()
+    if store.get("pendingRevert"):
+        store["pendingRevert"] = None
+        save_store(store)
+
+
+def confirm_layout():
+    clear_pending_revert()
+    print(json.dumps(snapshot(), separators=(",", ":")))
+    return 0
+
+
+def revert_layout():
+    if not os.path.isfile(REVERT_LUA):
+        store = load_store()
+        if store.get("pendingRevert"):
+            store["pendingRevert"] = None
+            save_store(store)
+        print(json.dumps(snapshot(), separators=(",", ":")))
+        return 0
+    shutil.copyfile(REVERT_LUA, MONITORS_LUA)
+    clear_pending_revert()
+    reload_hypr()
+    print(json.dumps(snapshot(), separators=(",", ":")))
+    return 0
+
+
+def pending_revert_due():
+    store = load_store()
+    pending = store.get("pendingRevert") or {}
+    if not pending:
+        return False
+    try:
+        deadline = float(pending.get("deadline") or 0)
+    except (TypeError, ValueError):
+        return False
+    return deadline > 0 and time.time() >= deadline
+
+
+def apply(payload, gdk=None, preview=False):
     monitors = payload.get("monitors") if isinstance(payload, dict) else None
     if not isinstance(monitors, list) or not monitors:
         print("apply: expected {\"monitors\": [...]}", file=sys.stderr)
@@ -2084,6 +2717,8 @@ def apply(payload, gdk=None):
     if os.path.isfile(MONITORS_LUA):
         with open(MONITORS_LUA, encoding="utf-8") as fh:
             prev = fh.read()
+    if preview:
+        stash_revert_lua(prev)
     write_monitors_lua(monitors, gdk=gdk)
     reload_hypr()
     max_vrr = 0
@@ -2102,6 +2737,8 @@ def apply(payload, gdk=None):
             with open(MONITORS_LUA, "w", encoding="utf-8") as fh:
                 fh.write(prev)
             reload_hypr()
+        if preview:
+            clear_pending_revert()
         print(errors, file=sys.stderr)
         return 1
     prev_store = load_store()
@@ -2111,6 +2748,10 @@ def apply(payload, gdk=None):
         pin_and_save_plan(monitors)
     else:
         write_workspaces_json(False, [], load_store().get("workspaceLayouts") or {})
+    if preview:
+        store = load_store()
+        store["pendingRevert"] = {"deadline": time.time() + 10}
+        save_store(store)
     print(json.dumps(snapshot(), separators=(",", ":")))
     return 0
 
@@ -2168,8 +2809,13 @@ def profile_entry_from_monitor(mon):
         "sdrMinLuminance": clean_float(mon.get("sdrMinLuminance"), 0.0, 1.0, 0.005),
         "sdrMaxLuminance": clean_int(mon.get("sdrMaxLuminance"), 40, 1000, 200),
         "sdrBrightness": clean_float(mon.get("sdrBrightness"), 0.5, 2.5, 1.0),
+        "sdrSaturation": clean_float(mon.get("sdrSaturation"), 0.5, 2.0, 1.0),
+        "sdrEotf": clean_sdr_eotf(mon.get("sdrEotf")),
+        "supportsWideColor": clean_wide_color(mon.get("supportsWideColor")),
         "minLuminance": clean_float(mon.get("minLuminance"), 0.0, 10.0, -1),
         "maxLuminance": clean_int(mon.get("maxLuminance"), -1, 10000, -1),
+        "maxAvgLuminance": clean_int(mon.get("maxAvgLuminance"), -1, 10000, -1),
+        "textPx": clean_int(mon.get("textPx"), 0, 20, 0),
         "enabled": bool(mon.get("enabled", True)),
         "mirror": mon.get("mirror") or "",
     }
@@ -2187,7 +2833,8 @@ def merge_profile(profile, live):
         for key in (
             "mode", "x", "y", "scale", "transform", "vrr", "hdr",
             "hdrMode", "bitdepth", "cm", "sdrMinLuminance", "sdrMaxLuminance",
-            "sdrBrightness", "minLuminance", "maxLuminance", "enabled", "mirror",
+            "sdrBrightness", "sdrSaturation", "sdrEotf", "supportsWideColor",
+            "textPx", "minLuminance", "maxLuminance", "maxAvgLuminance", "enabled", "mirror",
         ):
             if key in rule:
                 item[key] = rule[key]
@@ -2661,14 +3308,27 @@ def main(argv):
         return 1
     if cmd == "restore-original":
         return restore_original()
+    if cmd == "confirm":
+        return confirm_layout()
+    if cmd == "revert":
+        return revert_layout()
+    if cmd == "revert-if-due":
+        if pending_revert_due():
+            return revert_layout()
+        return 0
     if cmd == "apply":
-        raw = argv[1] if len(argv) > 1 else sys.stdin.read()
+        args = argv[1:]
+        preview = False
+        if args and args[0] in ("--preview", "preview"):
+            preview = True
+            args = args[1:]
+        raw = args[0] if args else sys.stdin.read()
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError as exc:
             print("apply: bad json: %s" % exc, file=sys.stderr)
             return 2
-        return apply(payload)
+        return apply(payload, preview=preview)
     if cmd == "enable":
         return enable_output(argv[1] if len(argv) > 1 else "")
     if cmd == "unmirror":
@@ -2733,7 +3393,8 @@ def main(argv):
         if action in ("remove", "uninstall"):
             print(
                 "conflicts: Screens does not remove other plugins. "
-                "Remove hyprmoncfg yourself.",
+                "Remove hyprmoncfg yourself, or open HyprMod and trash "
+                "its per-display monitor rules.",
                 file=sys.stderr,
             )
             return 2
@@ -2750,6 +3411,12 @@ def main(argv):
         return set_bar_care(
             argv[1] if len(argv) > 1 else "",
             argv[2] if len(argv) > 2 else "",
+        )
+    if cmd == "scale-keys":
+        return apply_scale_keys(
+            argv[1] if len(argv) > 1 else "",
+            argv[2] if len(argv) > 2 else "",
+            argv[3] if len(argv) > 3 else "",
         )
     if cmd == "scale":
         return scale_step(argv[1] if len(argv) > 1 else "")

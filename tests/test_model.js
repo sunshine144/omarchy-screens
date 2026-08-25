@@ -34,6 +34,22 @@ assert.ok(Model.barOpacityFor({ enabled: true, dim: 40 }, { hovered: true }) ===
 assert.ok(Model.barOpacityFor({ enabled: true, dim: 40, hoverLift: false }, { hovered: true }) < 1)
 assert.strictEqual(Model.barOpacityFor({ enabled: true, dim: 100 }, {}), 0)
 assert.strictEqual(Model.clampBarDim(140), 100)
+assert.strictEqual(Model.formatScale(1.33), "1.33")
+assert.strictEqual(Model.formatScale(1.5), "1.5")
+assert.ok(Model.scaleIsSharp({ width: 3840, height: 2160 }, 1.25))
+assert.ok(!Model.scaleIsSharp({ width: 1920, height: 1080 }, 1.4))
+assert.ok(Model.hdrDescription({ hdrMode: 2, bitdepth: 10, cm: "hdr" }).indexOf("10-bit") >= 0)
+assert.ok(Model.scanoutLabel({ format: "XBGR2101010" }).indexOf("10-bit") >= 0)
+assert.ok(Model.scanoutLabel({ format: "XBGR16161616F" }).indexOf("16-bit float") >= 0)
+
+const row = [
+  { name: "left", enabled: true, mode: "1920x1080", width: 1920, height: 1080, scale: 1, transform: 0, x: 0, y: 0, logicalW: 1920, logicalH: 1080 },
+  { name: "right", enabled: true, mode: "1920x1080", width: 1920, height: 1080, scale: 1, transform: 0, x: 1920, y: 0, logicalW: 1920, logicalH: 1080 },
+]
+row[0].scale = 2
+Model.reflowAfterResize(row, 0, 1920, 1080)
+assert.strictEqual(row[0].logicalW, 960)
+assert.strictEqual(row[1].x, 960)
 
 function mon(name, x, y, w, h) {
   return { name: name, enabled: true, x: x, y: y, logicalW: w, logicalH: h }

@@ -89,6 +89,42 @@ Item {
     onTriggered: root.applyCareVisuals()
   }
 
+  property real revertDeadline: 0
+
+  FileView {
+    path: Quickshell.env("HOME") + "/.local/state/im0001gt.screens/profiles.json"
+    watchChanges: true
+    printErrors: false
+    onLoaded: {
+      try {
+        var data = JSON.parse(text() || "{}")
+        var pending = data.pendingRevert
+        root.revertDeadline = pending && pending.deadline ? Number(pending.deadline) : 0
+      } catch (e) {
+        root.revertDeadline = 0
+      }
+    }
+    onFileChanged: reload()
+    onLoadFailed: root.revertDeadline = 0
+    Component.onCompleted: reload()
+  }
+
+  Process {
+    id: revertWatchProc
+    command: [root.ctl, "revert-if-due"]
+    stdout: StdioCollector { waitForEnd: true }
+  }
+
+  Timer {
+    interval: 1000
+    running: root.revertDeadline > 0
+    repeat: true
+    onTriggered: {
+      if (Date.now() / 1000 < root.revertDeadline) return
+      if (!revertWatchProc.running) revertWatchProc.running = true
+    }
+  }
+
   function registerWidget() {
     if (!root.barWidgetRegistry) return
     var url = Qt.resolvedUrl("Workspaces.qml")

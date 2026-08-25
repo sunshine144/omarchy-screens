@@ -47,6 +47,7 @@ Panel {
   property bool showHybridNotice: false
   property var conflict: null
   property bool conflictDismissed: false
+  property var scaleKeys: ({ status: "" })
   property bool hdrTuning: false
   property bool barCareOpen: false
   property var barCare: Model.normalizeBarCare(null)
@@ -67,6 +68,11 @@ Panel {
   property int layoutMenuWorkspace: 0
   property var layoutMenuAnchor: null
   property bool layoutMenuOpen: false
+  property bool layoutDirty: false
+  property bool pendingConfirm: false
+  property int revertLeft: 10
+  property var liveMonitors: []
+  property int liveTextPx: 12
   readonly property var textSizeStops: [9, 10, 11, 12, 14, 16, 20]
 
   readonly property var selected: {
@@ -79,7 +85,7 @@ Panel {
     return n
   }
   readonly property int disabledCount: Math.max(0, monitors.length - enabledCount)
-  readonly property var scalePresets: ["1", "1.25", "1.5", "2"]
+  readonly property var scalePresets: ["1", "1.25", "1.33", "1.5", "2"]
   readonly property var rotateOptions: [
     { value: "0", label: "Landscape" },
     { value: "1", label: "Portrait 90°" },
@@ -98,9 +104,35 @@ Panel {
     { value: "8", label: "8-bit" },
     { value: "10", label: "10-bit" }
   ]
+  readonly property var wideColorOptions: [
+    { value: "0", label: "Auto" },
+    { value: "1", label: "Force" },
+    { value: "-1", label: "Off" }
+  ]
   readonly property var hdrCmOptions: [
-    { value: "hdredid", label: "Display" },
-    { value: "hdr", label: "Wide" }
+    { value: "auto", label: "Auto" },
+    { value: "srgb", label: "sRGB" },
+    { value: "edid", label: "EDID" },
+    { value: "dcip3", label: "DCI-P3" },
+    { value: "dp3", label: "Display P3" },
+    { value: "adobe", label: "Adobe RGB" },
+    { value: "wide", label: "BT.2020" },
+    { value: "hdredid", label: "HDR Display" },
+    { value: "hdr", label: "HDR Wide" }
+  ]
+  readonly property var sdrCmOptions: [
+    { value: "auto", label: "Auto" },
+    { value: "srgb", label: "sRGB" },
+    { value: "edid", label: "EDID" },
+    { value: "dcip3", label: "DCI-P3" },
+    { value: "dp3", label: "Display P3" },
+    { value: "adobe", label: "Adobe RGB" },
+    { value: "wide", label: "BT.2020" }
+  ]
+  readonly property var sdrEotfOptions: [
+    { value: "default", label: "Default" },
+    { value: "srgb", label: "sRGB" },
+    { value: "gamma22", label: "Gamma 2.2" }
   ]
   readonly property var hdrModeOptions: [
     { value: "0", label: "Off" },
@@ -141,6 +173,10 @@ Panel {
   }
 
   function refresh() {
+    if (root.layoutDirty || root.pendingConfirm) {
+      if (root.opened) root.refreshBrightness()
+      return
+    }
     if (!stateProc.running) stateProc.running = true
     if (root.opened) root.refreshBrightness()
   }
@@ -193,21 +229,53 @@ Panel {
   }
 
   function currentTextIndex() {
-    return root.textSizePreviewIndex >= 0
-      ? root.textSizePreviewIndex
-      : root.nearestTextStop(Style.font.baseSize)
+    var px = root.selected && Number(root.selected.textPx) >= 9
+      ? Number(root.selected.textPx)
+      : Style.font.baseSize
+    return root.nearestTextStop(px)
   }
 
   function displayedTextPx() {
-    return root.textSizePreviewIndex >= 0
-      ? root.textSizeStops[root.textSizePreviewIndex]
-      : Style.font.baseSize
+    if (root.selected && Number(root.selected.textPx) >= 9)
+      return Number(root.selected.textPx)
+    return Style.font.baseSize
   }
 
   function setTextSize(px) {
-    root.textSizePreviewIndex = root.nearestTextStop(px)
+    var stop = root.textSizeStops[root.nearestTextStop(px)]
+    mutateSelected(function(m) { m.textPx = stop })
+  }
+
+  function captureLive(list) {
+    root.liveMonitors = Model.clone(list || root.monitors)
+    root.liveTextPx = Style.font.baseSize
+  }
+
+  function applyPendingTextSize() {
+    var px = root.selected && Number(root.selected.textPx) >= 9
+      ? Number(root.selected.textPx)
+      : 0
+    if (!px || px === root.liveTextPx) return
     textScaleProc.command = ["omarchy-display-text-size", String(px)]
     if (!textScaleProc.running) textScaleProc.running = true
+  }
+
+  function restoreLiveTextSize() {
+    var px = root.liveTextPx
+    if (!(px >= 9)) px = 12
+    textScaleProc.command = ["omarchy-display-text-size", String(px)]
+    if (!textScaleProc.running) textScaleProc.running = true
+  }
+
+  function undoDraft() {
+    if (root.pendingConfirm) {
+      root.revertLayout()
+      return
+    }
+    if (root.liveMonitors && root.liveMonitors.length)
+      root.monitors = Model.clone(root.liveMonitors)
+    root.layoutDirty = false
+    root.textSizePreviewIndex = -1
   }
 
   function markReflowing() {
@@ -240,6 +308,7 @@ Panel {
       root.conflict = data.conflict
     else
       root.conflict = null
+    root.scaleKeys = (data && data.scaleKeys) ? data.scaleKeys : ({ status: "" })
     if (root.activeProfile && !root.namingProfile) root.profileName = root.activeProfile
     if (root.detectPending) {
       root.detectPending = false
@@ -267,6 +336,8 @@ Panel {
     } else if (root.selectedIndex >= list.length) {
       root.selectedIndex = Math.max(0, list.length - 1)
     }
+    if (!root.layoutDirty && !root.pendingConfirm)
+      root.captureLive(list)
     var key = (data && data.connectedKey) ? String(data.connectedKey) : ""
     var prev = root.lastKey
     if (key) root.lastKey = key
@@ -280,40 +351,86 @@ Panel {
   function mutateSelected(fn) {
     if (!root.selected) return
     var next = Model.clone(root.monitors)
-    fn(next[root.selectedIndex], next)
+    fn(next[root.selectedIndex], next, root.selectedIndex)
     root.monitors = next
-    applyNow()
+    root.layoutDirty = true
   }
 
-  function applyNow() {
+  function applyNow(preview) {
     if (applyProc.running) {
       root.applying = true
       return
     }
     var payload = JSON.stringify(Model.applyPayload(Model.normalizeOrigin(Model.clone(root.monitors))))
-    applyProc.command = [root.ctl, "apply", payload]
+    applyProc.command = preview
+      ? [root.ctl, "apply", "--preview", payload]
+      : [root.ctl, "apply", payload]
     root.applying = true
+    if (preview) {
+      root.pendingConfirm = true
+      root.revertLeft = 10
+      revertTick.restart()
+      if (!root.opened) root.open()
+    }
     applyProc.running = true
   }
 
+  function applyDraft() {
+    applyNow(true)
+    root.applyPendingTextSize()
+  }
+
+  function keepLayout() {
+    revertTick.stop()
+    root.pendingConfirm = false
+    root.layoutDirty = false
+    root.captureLive(root.monitors)
+    keepProc.command = [root.ctl, "confirm"]
+    if (!keepProc.running) keepProc.running = true
+  }
+
+  function revertLayout() {
+    revertTick.stop()
+    root.pendingConfirm = false
+    root.layoutDirty = false
+    root.restoreLiveTextSize()
+    if (revertProc.running) return
+    revertProc.command = [root.ctl, "revert"]
+    root.applying = true
+    revertProc.running = true
+  }
+
+  function resizeSelected(mutator) {
+    mutateSelected(function(m, list, idx) {
+      var oldW = Model.logicalW(m)
+      var oldH = Model.logicalH(m)
+      mutator(m)
+      var dim = Model.sizeFromMode(m.mode)
+      if (dim.width) m.width = dim.width
+      if (dim.height) m.height = dim.height
+      Model.applyLogicalSize(m)
+      Model.reflowAfterResize(list, idx, oldW, oldH)
+    })
+  }
+
   function setMode(mode) {
-    mutateSelected(function(m) { m.mode = mode })
+    root.resizeSelected(function(m) { m.mode = mode })
   }
 
   function setResolution(res) {
-    mutateSelected(function(m) {
+    root.resizeSelected(function(m) {
       var hz = parseFloat(String(m.mode || "").split("@")[1])
       m.mode = Model.pickMode(m, res, hz)
     })
   }
 
-  function setScale(scale) {
-    mutateSelected(function(m) { m.scale = Number(scale) })
-    Qt.callLater(function() { root.revealItem(scaleSection) })
+  function setScale(scale, reveal) {
+    root.resizeSelected(function(m) { m.scale = Math.round(Number(scale) * 100) / 100 })
+    if (reveal) Qt.callLater(function() { root.revealItem(scaleSection) })
   }
 
   function setTransform(value) {
-    mutateSelected(function(m) { m.transform = parseInt(value, 10) || 0 })
+    root.resizeSelected(function(m) { m.transform = parseInt(value, 10) || 0 })
   }
 
   function setVrr(value) {
@@ -332,11 +449,11 @@ Panel {
       m.hdrMode = n
       m.hdr = n === 2
       if (n === 0) return
-      var capable = Number(m.bitdepthCapable) === 8 ? 8 : 10
+      var capable = Number(m.bitdepthCapable) >= 10 ? 10 : 8
       if (Number(m.bitdepth) !== 8 && Number(m.bitdepth) !== 10)
         m.bitdepth = capable
-      if (!m.wideGamut) m.cm = "hdredid"
-      else if (m.cm !== "hdr" && m.cm !== "hdredid") m.cm = "hdr"
+      if (n === 2 && m.cm !== "hdr" && m.cm !== "hdredid")
+        m.cm = m.wideGamut ? "hdr" : "hdredid"
       if (m.sdrMinLuminance === undefined || m.sdrMinLuminance === null
           || Number(m.sdrMinLuminance) >= 0.199)
         m.sdrMinLuminance = 0.005
@@ -356,10 +473,27 @@ Panel {
     mutateSelected(function(m) { m.bitdepth = n })
   }
 
+  function setWideColor(value) {
+    var n = parseInt(value, 10)
+    if (n !== 1 && n !== -1) n = 0
+    mutateSelected(function(m) { m.supportsWideColor = n })
+  }
+
   function setHdrCm(value) {
-    if (!root.selectedHdrOk) return
-    var cm = String(value) === "hdredid" ? "hdredid" : "hdr"
+    var cm = String(value || "srgb")
     mutateSelected(function(m) { m.cm = cm })
+  }
+
+  function setSdrSaturation(value) {
+    if (!root.selected) return
+    var next = Model.clone(root.monitors)
+    next[root.selectedIndex].sdrSaturation = Math.max(0.5, Math.min(2.0, Math.round(Number(value) * 20) / 20))
+    root.monitors = next
+    root.layoutDirty = true
+  }
+
+  function setSdrEotf(value) {
+    mutateSelected(function(m) { m.sdrEotf = String(value || "default") })
   }
 
   function setSdrMin(value, apply) {
@@ -367,7 +501,7 @@ Panel {
     var next = Model.clone(root.monitors)
     next[root.selectedIndex].sdrMinLuminance = Math.max(0, Math.min(0.2, Number(value)))
     root.monitors = next
-    if (apply) applyNow()
+    root.layoutDirty = true
   }
 
   function setSdrMax(value, apply) {
@@ -375,7 +509,7 @@ Panel {
     var next = Model.clone(root.monitors)
     next[root.selectedIndex].sdrMaxLuminance = Math.max(40, Math.min(400, Math.round(Number(value))))
     root.monitors = next
-    if (apply) applyNow()
+    root.layoutDirty = true
   }
 
   function setSdrBrightness(value, apply) {
@@ -383,7 +517,7 @@ Panel {
     var next = Model.clone(root.monitors)
     next[root.selectedIndex].sdrBrightness = Math.max(0.8, Math.min(2.0, Math.round(Number(value) * 20) / 20))
     root.monitors = next
-    if (apply) applyNow()
+    root.layoutDirty = true
   }
 
   function revealItem(item) {
@@ -440,7 +574,7 @@ Panel {
     var next = Model.clone(root.monitors)
     next[index].enabled = true
     root.monitors = next
-    applyNow()
+    root.layoutDirty = true
   }
 
   function setMirror(name) {
@@ -528,6 +662,10 @@ Panel {
 
   function dismissConflict() {
     root.conflictDismissed = true
+  }
+
+  function setScaleKeys(action) {
+    root.runStore(["scale-keys", action])
   }
 
   function setPrimary() {
@@ -637,6 +775,8 @@ Panel {
       root.detectPending = false
       root.hdrTuning = false
       root.barCareOpen = false
+      if (root.pendingConfirm) root.revertLayout()
+      else if (root.layoutDirty) root.undoDraft()
       return
     }
     root.userPicked = false
@@ -661,7 +801,7 @@ Panel {
 
   Timer {
     interval: root.opened ? 4000 : 2000
-    running: !root.dragging && !root.applying
+    running: !root.dragging && !root.applying && !root.layoutDirty && !root.pendingConfirm
     repeat: true
     onTriggered: root.refresh()
   }
@@ -688,6 +828,37 @@ Panel {
         try { root.adopt(JSON.parse(text)) }
         catch (e) {}
       }
+    }
+  }
+
+  Timer {
+    id: revertTick
+    interval: 1000
+    repeat: true
+    onTriggered: {
+      root.revertLeft = root.revertLeft - 1
+      if (root.revertLeft <= 0) root.revertLayout()
+    }
+  }
+
+  Process {
+    id: keepProc
+    stdout: StdioCollector { waitForEnd: true }
+  }
+
+  Process {
+    id: revertProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.applying = false
+        try { root.adopt(JSON.parse(text)) }
+        catch (e) { root.refresh() }
+      }
+    }
+    onExited: function(code) {
+      root.applying = false
+      if (code !== 0) root.refresh()
     }
   }
 
@@ -853,6 +1024,104 @@ Panel {
           id: panelColumn
           width: panelFlick.width
           spacing: Style.space(10)
+
+          Column {
+            visible: !!(root.conflict && !root.conflictDismissed)
+            width: parent.width
+            spacing: Style.space(8)
+
+            Text {
+              width: parent.width
+              wrapMode: Text.WordWrap
+              text: (root.conflict && root.conflict.message)
+                ? root.conflict.message
+                : "Another display tool is still managing your screens. Screens will not disable it for you."
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            Button {
+              text: "Got it"
+              fontSize: Style.font.caption
+              fontFamily: root.bar.fontFamily
+              foreground: root.bar.foreground
+              bordered: true
+              horizontalPadding: Style.space(10)
+              verticalPadding: Style.space(4)
+              onClicked: root.dismissConflict()
+            }
+          }
+
+          Column {
+            width: parent.width
+            spacing: Style.space(6)
+            visible: root.layoutDirty || root.pendingConfirm
+
+            Text {
+              width: parent.width
+              wrapMode: Text.WordWrap
+              text: root.pendingConfirm
+                ? ("Keep this layout? Reverting in " + root.revertLeft + "s")
+                : "Changes are only in this panel. Apply to preview, Undo to throw them away."
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.body
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+
+              Button {
+                visible: !root.pendingConfirm
+                width: (parent.width - parent.spacing) / 2
+                text: "Apply"
+                fontSize: Style.font.caption
+                fontFamily: root.bar.fontFamily
+                foreground: root.bar.foreground
+                bordered: true
+                active: true
+                tooltipText: "Preview on the displays. Reverts in 10 seconds unless you Keep."
+                onClicked: root.applyDraft()
+              }
+
+              Button {
+                visible: !root.pendingConfirm
+                width: (parent.width - parent.spacing) / 2
+                text: "Undo"
+                fontSize: Style.font.caption
+                fontFamily: root.bar.fontFamily
+                foreground: root.bar.foreground
+                bordered: true
+                tooltipText: "Throw away panel changes and restore the last live layout."
+                onClicked: root.undoDraft()
+              }
+
+              Button {
+                visible: root.pendingConfirm
+                width: (parent.width - parent.spacing) / 2
+                text: "Keep"
+                fontSize: Style.font.caption
+                fontFamily: root.bar.fontFamily
+                foreground: root.bar.foreground
+                bordered: true
+                active: true
+                onClicked: root.keepLayout()
+              }
+
+              Button {
+                visible: root.pendingConfirm
+                width: (parent.width - parent.spacing) / 2
+                text: "Revert"
+                fontSize: Style.font.caption
+                fontFamily: root.bar.fontFamily
+                foreground: root.bar.foreground
+                bordered: true
+                onClicked: root.revertLayout()
+              }
+            }
+          }
 
           Item {
             width: parent.width
@@ -1065,30 +1334,53 @@ Panel {
           }
 
           Column {
-            visible: !!(root.conflict && !root.conflictDismissed)
+            visible: !!(root.scaleKeys && root.scaleKeys.status === "pending")
             width: parent.width
             spacing: Style.space(8)
 
             Text {
               width: parent.width
               wrapMode: Text.WordWrap
-              text: (root.conflict && root.conflict.message)
-                ? root.conflict.message
-                : "hyprmoncfg is still installed and will keep control of screen settings until you remove it. Screens will not disable it for you."
+              text: (root.scaleKeys && root.scaleKeys.message)
+                ? root.scaleKeys.message
+                : "Super+/ is already bound to something that is not Omarchy Display scale. Screens will not steal it unless you say so."
               color: root.bar.foreground
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.caption
             }
 
             Button {
-              text: "Got it"
+              width: parent.width
+              text: "Use Super+/ for scale"
               fontSize: Style.font.caption
               fontFamily: root.bar.fontFamily
               foreground: root.bar.foreground
               bordered: true
-              horizontalPadding: Style.space(10)
-              verticalPadding: Style.space(4)
-              onClicked: root.dismissConflict()
+              tooltipText: "Take Super+/ and Super+Alt+/ for Screens scale, like stock Display."
+              onClicked: root.setScaleKeys("take")
+            }
+
+            Button {
+              width: parent.width
+              visible: !!(root.scaleKeys && root.scaleKeys.altUp)
+              text: "Use " + ((root.scaleKeys && root.scaleKeys.altUp) ? root.scaleKeys.altUp : "Super+Ctrl+/") + " instead"
+              fontSize: Style.font.caption
+              fontFamily: root.bar.fontFamily
+              foreground: root.bar.foreground
+              bordered: true
+              tooltipText: "Leave your current Super+/ bind and put scale on a free pair."
+              onClicked: root.setScaleKeys("alt")
+            }
+
+            Button {
+              width: parent.width
+              text: "Keep my keybind"
+              fontSize: Style.font.caption
+              fontFamily: root.bar.fontFamily
+              foreground: root.bar.foreground
+              bordered: true
+              tooltipText: "Do not bind scale keys. Change scale from this panel."
+              onClicked: root.setScaleKeys("skip")
             }
           }
 
@@ -1490,7 +1782,7 @@ Panel {
                   root.guideX = null
                   root.guideY = null
                   root.monitors = Model.normalizeOrigin(Model.clone(root.monitors))
-                  root.applyNow()
+                  root.layoutDirty = true
                 }
               }
 
@@ -1707,7 +1999,16 @@ Panel {
                 integer: true
                 tickCount: root.textSizeStops.length
                 value: root.currentTextIndex()
-                onReleased: function(v) { root.setTextSize(root.textSizeStops[Math.round(v)]) }
+                onMoved: function(v) { root.setTextSize(root.textSizeStops[Math.round(v)]) }
+              }
+
+              Text {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: "Remembered per display. Omarchy only has one desk font, so Apply uses this display's size for shell, GTK, and terminals. Scale below is truly per output."
+                color: Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
               }
             }
 
@@ -1716,10 +2017,39 @@ Panel {
               width: parent.width
               spacing: Style.space(4)
 
-              PanelSectionHeader {
-                text: "SCALE"
-                foreground: root.bar.foreground
-                fontFamily: root.bar.fontFamily
+              Item {
+                width: parent.width
+                implicitHeight: Math.max(scaleHeader.implicitHeight, scaleValue.implicitHeight)
+
+                PanelSectionHeader {
+                  id: scaleHeader
+                  text: "SCALE"
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Text {
+                  id: scaleValue
+                  text: Model.formatScale(root.selected ? root.selected.scale : 1) + "×"
+                  color: Qt.darker(root.bar.foreground, 1.4)
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+              }
+
+              PanelSlider {
+                width: parent.width
+                bar: root.bar
+                minimum: 1.0
+                maximum: 4.0
+                step: 0.01
+                value: root.selected && Number(root.selected.scale) > 0 ? Number(root.selected.scale) : 1
+                onMoved: function(v) { root.setScale(v) }
               }
 
               Grid {
@@ -1740,10 +2070,22 @@ Panel {
                     fontFamily: root.bar.fontFamily
                     foreground: root.bar.foreground
                     bordered: true
-                    active: root.selected && Math.abs(Number(root.selected.scale) - Number(modelData)) < 0.01
-                    onClicked: root.setScale(modelData)
+                    active: root.selected && Math.abs(Number(root.selected.scale) - Number(modelData)) < 0.005
+                    onClicked: root.setScale(modelData, true)
                   }
                 }
+              }
+
+              Text {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                visible: !!(root.selected)
+                text: Model.scaleIsSharp(root.selected, root.selected ? root.selected.scale : 1)
+                  ? "This output only. Whole-pixel scale — sharp."
+                  : "This output only. Logical size is not whole pixels — may look soft. Try 1.25 or 1.33."
+                color: Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
               }
             }
 
@@ -1875,59 +2217,59 @@ Panel {
                   Text {
                     width: parent.width
                     wrapMode: Text.WordWrap
-                    text: Number(root.selected && root.selected.bitdepthCapable) === 8
-                      ? "EDID reports 8-bit. 10-bit may still work on DisplayPort."
-                      : "10-bit HDR. Use 8-bit if screen capture fails."
+                    text: {
+                      var cap = Number(root.selected && root.selected.bitdepthCapable)
+                      var live = Model.scanoutLabel(root.selected)
+                      if (cap === 8)
+                        return live + ". EDID reports 8-bit; 10-bit may still work on DisplayPort."
+                      return live + ". Hyprland output is 8-bit or 10-bit. Use 8-bit if screen capture fails."
+                    }
                     color: Qt.darker(root.bar.foreground, 1.4)
                     font.family: root.bar.fontFamily
                     font.pixelSize: Style.font.caption
                   }
                 }
 
-                Column {
+                Dropdown {
                   width: parent.width
-                  spacing: Style.space(4)
+                  label: "WIDE COLOR"
+                  showLabel: true
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  value: root.selected ? String(Number(root.selected.supportsWideColor) || 0) : "0"
+                  options: root.wideColorOptions
+                  onChanged: function(v) { root.setWideColor(v) }
+                }
 
-                  PanelSectionHeader {
-                    text: "COLOR SPACE"
-                    foreground: root.bar.foreground
-                    fontFamily: root.bar.fontFamily
-                  }
+                Text {
+                  width: parent.width
+                  wrapMode: Text.WordWrap
+                  text: "Auto follows EDID BT.2020. Force treats this panel as wide-gamut if EDID is wrong. Off blocks wide colour even when EDID claims it."
+                  color: Qt.darker(root.bar.foreground, 1.4)
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
 
-                  Grid {
-                    id: hdrCmRow
-                    width: parent.width
-                    columns: root.hdrCmOptions.length
-                    spacing: Style.spacing.xs
-                    readonly property real cellWidth: (width - spacing * (columns - 1)) / columns
+                Dropdown {
+                  width: parent.width
+                  label: "COLOR PRESET"
+                  showLabel: true
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  value: root.selected ? String(root.selected.cm || "srgb") : "srgb"
+                  options: root.hdrCmOptions
+                  onChanged: function(v) { root.setHdrCm(v) }
+                }
 
-                    Repeater {
-                      model: root.hdrCmOptions
-
-                      Button {
-                        required property var modelData
-                        width: hdrCmRow.cellWidth
-                        text: modelData.label
-                        fontSize: Style.font.caption
-                        fontFamily: root.bar.fontFamily
-                        foreground: root.bar.foreground
-                        bordered: true
-                        active: root.selected && String(root.selected.cm) === String(modelData.value)
-                        onClicked: root.setHdrCm(modelData.value)
-                      }
-                    }
-                  }
-
-                  Text {
-                    width: parent.width
-                    wrapMode: Text.WordWrap
-                    text: root.selected && root.selected.wideGamut
-                      ? "Wide is BT.2020. Display uses this panel's measured colors."
-                      : "Display matches this LCD. Wide (BT.2020) often looks dull here."
-                    color: Qt.darker(root.bar.foreground, 1.4)
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: Style.font.caption
-                  }
+                Dropdown {
+                  width: parent.width
+                  label: "SDR TRANSFER"
+                  showLabel: true
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  value: root.selected ? String(root.selected.sdrEotf || "default") : "default"
+                  options: root.sdrEotfOptions
+                  onChanged: function(v) { root.setSdrEotf(v) }
                 }
 
                 Column {
@@ -1982,6 +2324,51 @@ Panel {
                     color: Qt.darker(root.bar.foreground, 1.4)
                     font.family: root.bar.fontFamily
                     font.pixelSize: Style.font.caption
+                  }
+                }
+
+                Column {
+                  width: parent.width
+                  spacing: Style.space(4)
+
+                  Item {
+                    width: parent.width
+                    implicitHeight: Math.max(sdrSatHeader.implicitHeight, sdrSatValue.implicitHeight)
+
+                    PanelSectionHeader {
+                      id: sdrSatHeader
+                      text: "SDR SATURATION"
+                      foreground: root.bar.foreground
+                      fontFamily: root.bar.fontFamily
+                      anchors.left: parent.left
+                      anchors.verticalCenter: parent.verticalCenter
+                    }
+
+                    Text {
+                      id: sdrSatValue
+                      text: {
+                        var n = root.selected ? Number(root.selected.sdrSaturation) : 1.0
+                        if (!isFinite(n) || n <= 0) n = 1.0
+                        return n.toFixed(2) + "×"
+                      }
+                      color: Qt.darker(root.bar.foreground, 1.4)
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: Style.font.caption
+                      font.bold: true
+                      anchors.right: parent.right
+                      anchors.verticalCenter: parent.verticalCenter
+                    }
+                  }
+
+                  PanelSlider {
+                    width: parent.width
+                    bar: root.bar
+                    minimum: 0.5
+                    maximum: 2.0
+                    step: 0.05
+                    value: root.selected && isFinite(Number(root.selected.sdrSaturation)) && Number(root.selected.sdrSaturation) > 0
+                      ? Number(root.selected.sdrSaturation) : 1.0
+                    onMoved: function(v) { root.setSdrSaturation(v) }
                   }
                 }
 
@@ -2096,6 +2483,18 @@ Panel {
                   }
                 }
               }
+            }
+
+            Dropdown {
+              visible: root.selectedHdrOk && Model.hdrModeOf(root.selected) === 0
+              width: parent.width
+              label: "COLOR PRESET"
+              showLabel: true
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              value: root.selected ? String(root.selected.cm || "srgb") : "srgb"
+              options: root.sdrCmOptions
+              onChanged: function(v) { root.setHdrCm(v) }
             }
 
             Dropdown {

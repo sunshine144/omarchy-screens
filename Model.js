@@ -29,6 +29,9 @@ function clone(monitors) {
       sdrMinLuminance: m.sdrMinLuminance,
       sdrMaxLuminance: m.sdrMaxLuminance,
       sdrBrightness: m.sdrBrightness,
+      sdrSaturation: m.sdrSaturation,
+      sdrEotf: m.sdrEotf,
+      supportsWideColor: Number(m.supportsWideColor) || 0,
       wideGamut: !!m.wideGamut,
       minLuminance: m.minLuminance,
       maxLuminance: m.maxLuminance,
@@ -41,7 +44,8 @@ function clone(monitors) {
       physicalH: m.physicalH,
       identity: m.identity,
       mirror: m.mirror || "",
-      secondaryGpu: !!m.secondaryGpu
+      secondaryGpu: !!m.secondaryGpu,
+      textPx: Number(m.textPx) || 0
     })
   }
   return out
@@ -85,12 +89,72 @@ function preferredIndex(monitors, barScreen, primary) {
   return monitors.length ? 0 : -1
 }
 
+function sizeFromMode(mode) {
+  var res = String(mode || "").split("@")[0].toLowerCase().split("x")
+  var w = parseInt(res[0], 10)
+  var h = parseInt(res[1], 10)
+  return {
+    width: isFinite(w) && w > 0 ? w : 0,
+    height: isFinite(h) && h > 0 ? h : 0
+  }
+}
+
+function logicalSizeOf(mon) {
+  var dim = sizeFromMode(mon && mon.mode)
+  var w = dim.width || Number(mon && mon.width) || 1920
+  var h = dim.height || Number(mon && mon.height) || 1080
+  var s = Number(mon && mon.scale)
+  if (!isFinite(s) || s <= 0) s = 1
+  var lw = Math.round(w / s)
+  var lh = Math.round(h / s)
+  var t = Number(mon && mon.transform) || 0
+  if (t === 1 || t === 3 || t === 5 || t === 7) {
+    var tmp = lw
+    lw = lh
+    lh = tmp
+  }
+  return { w: Math.max(1, lw), h: Math.max(1, lh) }
+}
+
+function applyLogicalSize(mon) {
+  var sz = logicalSizeOf(mon)
+  mon.logicalW = sz.w
+  mon.logicalH = sz.h
+  return mon
+}
+
+function reflowAfterResize(monitors, index, oldW, oldH) {
+  var m = monitors && monitors[index]
+  if (!m || !m.enabled) return monitors
+  applyLogicalSize(m)
+  var dx = logicalW(m) - Number(oldW)
+  var dy = logicalH(m) - Number(oldH)
+  if (!dx && !dy) return monitors
+  var oldRight = Number(m.x) + Number(oldW)
+  var oldBottom = Number(m.y) + Number(oldH)
+  for (var i = 0; i < monitors.length; i++) {
+    if (i === index || !monitors[i].enabled) continue
+    if (dx && monitors[i].x >= oldRight) monitors[i].x += dx
+    if (dy && monitors[i].y >= oldBottom) monitors[i].y += dy
+  }
+  return monitors
+}
+
 function logicalW(m) {
   return Math.max(1, Number(m.logicalW) || 1)
 }
 
 function logicalH(m) {
   return Math.max(1, Number(m.logicalH) || 1)
+}
+
+function scanoutLabel(mon) {
+  var fmt = String(mon && mon.format || "").toUpperCase()
+  if (!fmt) return "Live scanout unknown until Apply"
+  if (fmt.indexOf("16161616") >= 0) return "Live scanout: 16-bit float (compositor HDR buffer)"
+  if (fmt.indexOf("P012") >= 0 || fmt.indexOf("121212") >= 0) return "Live scanout: 12-bit packed"
+  if (fmt.indexOf("2101010") >= 0 || fmt.indexOf("101010") >= 0) return "Live scanout: 10-bit"
+  return "Live scanout: 8-bit"
 }
 
 function bounds(monitors) {
@@ -251,11 +315,16 @@ function applyPayload(monitors) {
       sdrMinLuminance: m.sdrMinLuminance,
       sdrMaxLuminance: m.sdrMaxLuminance,
       sdrBrightness: m.sdrBrightness,
+      sdrSaturation: m.sdrSaturation,
+      sdrEotf: m.sdrEotf,
+      supportsWideColor: Number(m.supportsWideColor) || 0,
       minLuminance: m.minLuminance,
       maxLuminance: m.maxLuminance,
+      maxAvgLuminance: m.maxAvgLuminance,
       enabled: !!m.enabled,
       identity: m.identity,
-      mirror: m.mirror || ""
+      mirror: m.mirror || "",
+      textPx: Number(m.textPx) || 0
     })
   }
   return { monitors: out }
@@ -364,6 +433,22 @@ function defaultSdrBrightness(mon) {
   var peak = Number(mon && mon.maxLuminance)
   if (isFinite(peak) && peak >= 600) return 1.0
   return 1.2
+}
+
+function scaleIsSharp(mon, scale) {
+  var w = Number(mon && mon.width)
+  var h = Number(mon && mon.height)
+  var s = Number(scale)
+  if (!(w > 0) || !(h > 0) || !(s > 0)) return true
+  var lw = w / s
+  var lh = h / s
+  return Math.abs(lw - Math.round(lw)) < 0.051 && Math.abs(lh - Math.round(lh)) < 0.051
+}
+
+function formatScale(value) {
+  var n = Number(value)
+  if (!isFinite(n) || n <= 0) return "1"
+  return String(n.toFixed(3)).replace(/0+$/, "").replace(/\.$/, "") || "1"
 }
 
 function clampBrightness(value) {
@@ -596,6 +681,13 @@ if (typeof module !== "undefined") {
     defaultHdrCm: defaultHdrCm,
     defaultSdrBrightness: defaultSdrBrightness,
     defaultSdrPeak: defaultSdrPeak,
+    scaleIsSharp: scaleIsSharp,
+    formatScale: formatScale,
+    sizeFromMode: sizeFromMode,
+    logicalSizeOf: logicalSizeOf,
+    applyLogicalSize: applyLogicalSize,
+    reflowAfterResize: reflowAfterResize,
+    scanoutLabel: scanoutLabel,
     clampBrightness: clampBrightness,
     brightnessName: brightnessName,
     lastDisplayQuip: lastDisplayQuip,

@@ -10,7 +10,7 @@ Click the two-tile mark for a panel that stays open. Displays are drawn at their
 
 | Layout | This screen | HDR | Profiles | Workspaces | Pixel Care |
 | --- | --- | --- | --- | --- | --- |
-| Drag tiles; edges snap, stacked tiles center lightly | Brightness, text size, resolution, Hz, scale, rotation, mirror, Detect | 8-bit or 10-bit PQ, Tune for black / peak | Name a desk; restore on connect | Optional spread of 1–10; right-click name, icon, Tile / Scroll / Float | Optional 0–100% bar dim, hover lift, no black veil |
+| Drag tiles; edges snap, neighbours reflow. Apply, then 10s Keep / Revert | Brightness, text size, resolution, Hz, scale slider, rotation, mirror, Detect | 8-bit or 10-bit PQ on HDR panels, Tune for black / peak | Name a desk; restore on connect | Optional spread of 1–10; right-click name, icon, Tile / Scroll / Float | Optional 0–100% bar dim, hover lift, no black veil |
 
 Works with two screens or a full battlestation. A fallback Hyprland rule still catches anything you hot-plug later. The panel scrolls when it is taller than the screen, so controls stay reachable at large scale (for example 2× on 1080p).
 
@@ -24,6 +24,7 @@ Other listed tools cover adjacent jobs:
 
 - **Stock Display** — backlight, font size, scale presets, enable/disable
 - **hyprmoncfg** — named profiles and a hotplug daemon. If that plugin or `hyprmoncfgd` is still installed, it stays in control of screen settings. Screens warns and yields until **you** remove it; it will not disable another plugin or daemon for you
+- **HyprMod** — GTK settings app. If it still has per-display monitor rules, those load after `monitors.lua` and win. Screens warns until **you** open HyprMod, click the trash can next to each managed display, and save; it will not delete HyprMod's rules for you
 - **Generic layout editors** — often reuse the stock monitor glyph, skip snap, and leave HDR/VRR in `monitors.lua`
 
 Screens keeps the editor in the bar, follows the theme, and writes Hyprland Lua only after you act. No AUR package. No extra daemon.
@@ -42,6 +43,8 @@ The first time Screens runs, it copies every stock file it may change into `~/.l
 
 If the [hyprmoncfg](https://github.com/crmne/omarchy-hyprmoncfg) plugin or its `hyprmoncfgd` daemon is still present, the Screens panel warns that it will stay in control until **you** remove it. Screens does not remove other plugins or stop other daemons. Typical cleanup is `omarchy plugin remove crmne.hyprmoncfg`, then stop `hyprmoncfgd` yourself if it is still running. The package is left in place unless you uninstall it.
 
+If [HyprMod](https://github.com/BlueManCZ/hyprmod) is managing displays, its `hyprland-gui.lua` (or `.conf`) rules load after Screens and keep winning. Open HyprMod, click the trash can next to each monitor, and save. You can keep HyprMod for other settings. Screens does not remove those rules.
+
 ## Use
 
 **Layout**
@@ -55,8 +58,9 @@ If the [hyprmoncfg](https://github.com/crmne/omarchy-hyprmoncfg) plugin or its `
 
 **This screen**
 
-- Pick a screen, then set **brightness**, **text size**, **resolution**, **refresh**, **scale**, **orientation**, or **mirror**
-- **Super+/** and **Super+Alt+/** step the focused display's scale after Screens takes over `monitors.lua`
+- Pick a screen, then set **brightness**, **text size**, **resolution**, **refresh**, **scale**, **orientation**, or **mirror**. Scale is per output (slider to 0.01, including 1.33×). Text size is remembered per display; Omarchy only has one desk font, so Apply uses that display's value
+- Layout, HDR, scale, and text size stay in the panel until **Apply**. **Undo** throws the draft away. Apply previews on the displays with a **10 second Keep / Revert**. Closing the panel without Keep undoes or reverts
+- **Super+/** and **Super+Alt+/** step the focused display's scale when those keys still belong to stock Display scaling. If you already bound them to something else, Screens asks before taking them (or offers Super+Ctrl+/ instead)
 - Brightness follows the selected output (internal backlight or DDC). It hides when that output has no backlight. A short label (Night owl, Golden hour, and so on) shows in the panel header while you drag the slider
 - Text size uses Omarchy's 9–20 px stops and applies to the shell, GTK, and terminals
 - Laptop built-in panels are written as `eDP-1` / `LVDS` / `DSI` so Omarchy's clamshell helper keeps your scale instead of forcing 2
@@ -65,7 +69,7 @@ If the [hyprmoncfg](https://github.com/crmne/omarchy-hyprmoncfg) plugin or its `
 **HDR and VRR**
 
 - **HDR**: **Off**, **Auto**, or **Always**. Auto keeps the desktop in SDR and only switches to HDR for fullscreen games and video (`cm_auto_hdr`). Always leaves PQ on all the time and can wash out HDR-ready LCDs
-- **Tune** (Auto or Always): 8-bit or 10-bit, color space, SDR brightness, black floor, and SDR peak
+- **Tune** (Auto or Always): 8-bit or 10-bit (Hyprland's real output depths), nine colour presets, wide-colour EDID override, SDR brightness/saturation/transfer, black floor, and SDR peak. Live scanout format is shown, not invented bit depths
 - Color space **Display** uses this panel's EDID primaries. **Wide** is BT.2020. HDR-ready LCDs that are not full wide-gamut should stay on Display
 - HDR and VRR disable themselves when that panel cannot do them
 - VRR modes: Off, Always, Fullscreen, Games & video. Always + HDR can flicker on some OLEDs; Fullscreen or Games & video is the usual workaround
@@ -154,7 +158,7 @@ Workspaces.qml           Per-display workspace numbers (right-click layout)
 WorkspaceLayoutMenu.qml  Name, icon, Tile / Scroll / Float picker
 Service.qml              Registers the workspace widget
 Model.js                 Snap / normalize / workspace split helpers
-scripts/display-ctl      hyprctl snapshot, monitors.lua writer, hyprmoncfg check, scale keys
+scripts/display-ctl      hyprctl snapshot, monitors.lua writer, hyprmoncfg / HyprMod check, scale keys
 preview.png              Marketplace still
 ```
 
