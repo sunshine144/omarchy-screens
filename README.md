@@ -1,5 +1,13 @@
 # Screens
 
+> [!NOTE]
+> **Fork & Attribution Notice**:  
+> This repository is a fork of the original **[Screens plugin by IM0001GT](https://github.com/IM0001GT/omarchy-screens)**. Full credit for the core plugin architecture and design belongs to **IM0001GT**.  
+> 
+> **Features added in this fork:**
+> * 🌓 **Interactive Night Light (Color Temperature)**: Kelvin slider (`1500K` to `6500K`) and quick On/Off toggle synchronized with `hyprsunset`.
+> * 🖥️ **"All Monitors" Brightness Control**: Toggle to adjust brightness across all connected displays simultaneously.
+
 An Omarchy bar widget for arranging displays and setting how they look.
 
 Click the two-tile mark for a panel that stays open. Displays are drawn at their real Hyprland size. Drag them and they **snap flush** — no overlapping tiles, no cursor-eating gaps. Stacking a screen above or below another also gets a **light center snap**, easy to pull off if you want it offset. Then set brightness, text size, resolution, refresh, HDR, VRR, scale, rotation, and mirroring. Save the desk as a named **profile**; Screens can restore it when a display is plugged in.
