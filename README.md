@@ -63,6 +63,10 @@ If [HyprMod](https://github.com/BlueManCZ/hyprmod) is managing displays, its `hy
 - **Super+/** and **Super+Alt+/** step the focused display's scale when those keys still belong to stock Display scaling. If you already bound them to something else, Screens asks before taking them (or offers Super+Ctrl+/ instead)
 - **Brightness & All Monitors**: Brightness follows the selected output (internal backlight or DDC). Directly beneath the slider, check **All monitors** to adjust brightness across every connected screen simultaneously.
 - **Night Light (Color Temperature)**: Directly beneath brightness, dial your exact color temperature from `1500K` (warm amber) to `6500K` (crisp daylight) with a live Kelvin slider and On/Off toggle switch. Synchronizes automatically with `hyprsunset` and the Omarchy status bar.
+
+<p align="center">
+  <img width="520" alt="Screens Night Light and All Monitors Controls" src="screens-night-light.png" />
+</p>
 - Text size uses Omarchy's 9–20 px stops and applies to the shell, GTK, and terminals
 - Laptop built-in panels are written as `eDP-1` / `LVDS` / `DSI` so Omarchy's clamshell helper keeps your scale instead of forcing 2
 - Labels use Hyprland's model string
