@@ -8,9 +8,9 @@ Click the two-tile mark for a panel that stays open. Displays are drawn at their
   <img width="960" alt="Screens" src="preview.png" />
 </p>
 
-| Layout | This screen | HDR | Profiles | Workspaces | Pixel Care |
-| --- | --- | --- | --- | --- | --- |
-| Drag tiles; edges snap, neighbours reflow. Apply, then 10s Keep / Revert | Brightness, text size, resolution, Hz, scale slider, rotation, mirror, Detect | 8-bit or 10-bit PQ on HDR panels, Tune for black / peak | Name a desk; restore on connect | Optional spread of 1–10; right-click name, icon, Tile / Scroll / Float | Optional 0–100% bar dim, hover lift, no black veil |
+| Layout | This screen | Night Light | HDR | Profiles | Workspaces | Pixel Care |
+| --- | --- | --- | --- | --- | --- | --- |
+| Drag tiles; edges snap, neighbours reflow. Apply, then 10s Keep / Revert | Brightness, All monitors toggle, text size, resolution, Hz, scale slider, rotation, mirror, Detect | 1500K–6500K Kelvin slider, instant toggle, hyprsunset sync | 8-bit or 10-bit PQ on HDR panels, Tune for black / peak | Name a desk; restore on connect | Optional spread of 1–10; right-click name, icon, Tile / Scroll / Float | Optional 0–100% bar dim, hover lift, no black veil |
 
 Works with two screens or a full battlestation. A fallback Hyprland rule still catches anything you hot-plug later. The panel scrolls when it is taller than the screen, so controls stay reachable at large scale (for example 2× on 1080p).
 
@@ -58,10 +58,11 @@ If [HyprMod](https://github.com/BlueManCZ/hyprmod) is managing displays, its `hy
 
 **This screen**
 
-- Pick a screen, then set **brightness**, **text size**, **resolution**, **refresh**, **scale**, **orientation**, or **mirror**. Scale is per output (slider to 0.01, including 1.33×). Text size is remembered per display; Omarchy only has one desk font, so Apply uses that display's value
+- Pick a screen, then set **brightness**, **night light temperature**, **text size**, **resolution**, **refresh**, **scale**, **orientation**, or **mirror**. Scale is per output (slider to 0.01, including 1.33×). Text size is remembered per display; Omarchy only has one desk font, so Apply uses that display's value
 - Layout, HDR, scale, and text size stay in the panel until **Apply**. **Undo** throws the draft away. Apply previews on the displays with a **10 second Keep / Revert**. Closing the panel without Keep undoes or reverts
 - **Super+/** and **Super+Alt+/** step the focused display's scale when those keys still belong to stock Display scaling. If you already bound them to something else, Screens asks before taking them (or offers Super+Ctrl+/ instead)
-- Brightness follows the selected output (internal backlight or DDC). It hides when that output has no backlight. A short label (Night owl, Golden hour, and so on) shows in the panel header while you drag the slider
+- **Brightness & All Monitors**: Brightness follows the selected output (internal backlight or DDC). Directly beneath the slider, check **All monitors** to adjust brightness across every connected screen simultaneously.
+- **Night Light (Color Temperature)**: Directly beneath brightness, dial your exact color temperature from `1500K` (warm amber) to `6500K` (crisp daylight) with a live Kelvin slider and On/Off toggle switch. Synchronizes automatically with `hyprsunset` and the Omarchy status bar.
 - Text size uses Omarchy's 9–20 px stops and applies to the shell, GTK, and terminals
 - Laptop built-in panels are written as `eDP-1` / `LVDS` / `DSI` so Omarchy's clamshell helper keeps your scale instead of forcing 2
 - Labels use Hyprland's model string
