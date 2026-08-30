@@ -53,10 +53,15 @@ Panel {
   property var barCare: Model.normalizeBarCare(null)
   property bool oledGuard: false
   property bool careDimDragging: false
+  property bool allMonitorsBrightness: false
   property int brightnessPercent: 0
   property int pendingBrightnessPercent: 0
   property bool brightnessSetQueued: false
   property bool brightnessAvailable: false
+  property int nightlightTemp: 4000
+  property int pendingNightlightTemp: 4000
+  property bool nightlightEnabled: false
+  property bool nightlightAvailable: true
   property int textSizePreviewIndex: -1
   property bool reflowingText: false
   property bool lastDisplayBounce: false
@@ -174,11 +179,17 @@ Panel {
 
   function refresh() {
     if (root.layoutDirty || root.pendingConfirm) {
-      if (root.opened) root.refreshBrightness()
+      if (root.opened) {
+        root.refreshBrightness()
+        root.refreshNightlight()
+      }
       return
     }
     if (!stateProc.running) stateProc.running = true
-    if (root.opened) root.refreshBrightness()
+    if (root.opened) {
+      root.refreshBrightness()
+      root.refreshNightlight()
+    }
   }
 
   function brightnessMonitor() {
@@ -202,20 +213,68 @@ Panel {
     var percent = Model.clampBrightness(value)
     root.brightnessPercent = percent
     root.pendingBrightnessPercent = percent
-    var name = root.brightnessMonitor()
-    if (!name) return
-    if (setBrightnessProc.running) {
-      root.brightnessSetQueued = true
-      return
+    if (root.allMonitorsBrightness) {
+      var cmds = []
+      for (var i = 0; i < root.monitors.length; i++) {
+        var m = root.monitors[i]
+        if (m && m.name && m.enabled !== false) {
+          cmds.push("omarchy-brightness-display --no-osd --monitor " + m.name + " " + percent + "%")
+        }
+      }
+      if (cmds.length > 0) {
+        setBrightnessProc.command = ["bash", "-lc", cmds.join("; ")]
+        if (!setBrightnessProc.running) setBrightnessProc.running = true
+      }
+    } else {
+      var name = root.brightnessMonitor()
+      if (!name) return
+      if (setBrightnessProc.running) {
+        root.brightnessSetQueued = true
+        return
+      }
+      root.brightnessSetQueued = false
+      setBrightnessProc.command = ["omarchy-brightness-display", "--no-osd", "--monitor", name, percent + "%"]
+      setBrightnessProc.running = true
     }
-    root.brightnessSetQueued = false
-    setBrightnessProc.command = ["omarchy-brightness-display", "--no-osd", "--monitor", name, percent + "%"]
-    setBrightnessProc.running = true
   }
 
   function previewBrightness(value) {
     root.brightnessPercent = Model.clampBrightness(value)
     brightnessDebounce.restart()
+  }
+
+  function refreshNightlight() {
+    if (setNightlightProc.running) return
+    if (nightlightSlider && nightlightSlider.dragging) return
+    if (!nightlightProbeProc.running) nightlightProbeProc.running = true
+  }
+
+  function setNightlight(value) {
+    var temp = Math.max(1500, Math.min(6500, Math.round(value)))
+    root.nightlightTemp = temp
+    root.nightlightEnabled = temp < 6000
+    setNightlightProc.command = ["bash", "-lc",
+      "pgrep -x hyprsunset >/dev/null || { setsid uwsm-app -- hyprsunset >/dev/null 2>&1 & sleep 0.5; }; " +
+      "hyprctl hyprsunset temperature " + temp + " >/dev/null 2>&1; " +
+      "omarchy-shell -q nightlight refresh >/dev/null 2>&1 || true"
+    ]
+    if (!setNightlightProc.running) setNightlightProc.running = true
+  }
+
+  function previewNightlight(value) {
+    root.nightlightTemp = Math.max(1500, Math.min(6500, Math.round(value)))
+    root.nightlightEnabled = root.nightlightTemp < 6000
+    nightlightDebounce.restart()
+  }
+
+  function setNightlightEnabled(enable) {
+    root.nightlightEnabled = enable
+    if (enable) {
+      var target = (root.nightlightTemp > 0 && root.nightlightTemp < 6000) ? root.nightlightTemp : 4000
+      root.setNightlight(target)
+    } else {
+      root.setNightlight(6500)
+    }
   }
 
   function nearestTextStop(px) {
@@ -949,6 +1008,39 @@ Panel {
       if (running) return
       if (root.brightnessSetQueued) root.setBrightness(root.pendingBrightnessPercent)
     }
+  }
+
+  Process {
+    id: nightlightProbeProc
+    command: ["hyprctl", "hyprsunset", "temperature"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (nightlightSlider && nightlightSlider.dragging) return
+        var line = String(text || "").trim()
+        var match = line.match(/\d+/)
+        if (match) {
+          var t = parseInt(match[0], 10)
+          if (isFinite(t) && t >= 1000 && t <= 20000) {
+            root.nightlightTemp = Math.max(1500, Math.min(6500, t))
+            root.nightlightEnabled = root.nightlightTemp < 6000
+            root.nightlightAvailable = true
+          }
+        }
+      }
+    }
+  }
+
+  Process {
+    id: setNightlightProc
+    stdout: StdioCollector { waitForEnd: true }
+  }
+
+  Timer {
+    id: nightlightDebounce
+    interval: 120
+    repeat: false
+    onTriggered: root.setNightlight(root.nightlightTemp)
   }
 
   Process {
@@ -1954,6 +2046,77 @@ Panel {
                 onReleased: function(v) {
                   brightnessDebounce.stop()
                   root.setBrightness(v)
+                }
+              }
+
+              Toggle {
+                width: parent.width
+                label: "All monitors"
+                description: "Adjust all connected displays simultaneously"
+                checked: root.allMonitorsBrightness
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                onClicked: root.allMonitorsBrightness = !root.allMonitorsBrightness
+              }
+            }
+
+            Column {
+              visible: root.nightlightAvailable
+              width: parent.width
+              spacing: Style.space(6)
+
+              Item {
+                width: parent.width
+                implicitHeight: Math.max(nightlightHeader.implicitHeight, nightlightRow.implicitHeight)
+
+                PanelSectionHeader {
+                  id: nightlightHeader
+                  text: "NIGHT LIGHT"
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Row {
+                  id: nightlightRow
+                  spacing: Style.space(8)
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+
+                  Text {
+                    id: nightlightValueLabel
+                    text: root.nightlightEnabled
+                      ? (Math.round(nightlightSlider.dragging ? nightlightSlider.liveValue : root.nightlightTemp) + "K")
+                      : "OFF"
+                    color: Qt.darker(root.bar.foreground, 1.4)
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+
+                  ToggleSwitch {
+                    checked: root.nightlightEnabled
+                    foreground: root.bar.foreground
+                    onToggled: root.setNightlightEnabled(!root.nightlightEnabled)
+                  }
+                }
+              }
+
+              PanelSlider {
+                id: nightlightSlider
+                width: parent.width
+                bar: root.bar
+                minimum: 1500
+                maximum: 6500
+                step: 50
+                value: root.nightlightTemp
+                integer: true
+                onMoved: function(v) { root.previewNightlight(v) }
+                onReleased: function(v) {
+                  nightlightDebounce.stop()
+                  root.setNightlight(v)
                 }
               }
             }
